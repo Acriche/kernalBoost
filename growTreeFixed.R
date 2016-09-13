@@ -1,4 +1,3 @@
-library(XML)
 
 growTree <- function(df, y, pred = NULL, objective = "binary:logistic", 
                      maxSplits = 10, minObsPerLeaf = 10, maxCandidatesPerFeature = 50,
