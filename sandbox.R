@@ -18,7 +18,7 @@ dfNumericTrain <- dfNumeric[trainInd, ]
 dfNumericTest <- dfNumeric[testInd, ]
 
 
-#RTree:
+#rTree:
 tree <- growTree(df = df, y = y, maxSplits = 6, maxCandidatesPerFeature = 10)
 library(data.tree)
 tree2 <- genPathString(tree)
@@ -27,9 +27,9 @@ p <- predict.rTree(tree = tree, df = df)
 rocAuc(y, p$pred)
 cv <- measureCvPerformance(y = y, df = dfNumeric, evalFun = "rocAuc")
 
-#RBoost:
+#rBoost:
 rBoostConfig <- list(objective = "binary:logistic", evalFunction = "rocAuc", 
-                     nTree = 50, eta = 0.01, colSampling = 0.3, rowSampling = 1,
+                     nTree = 15, eta = 0.01, colSampling = 0.3, rowSampling = 1,
                      maxSplits = 3, minObsPerLeaf = 30, maxCandidatesPerFeature = 10,
                      lambda = 10,
                      seed = 1)

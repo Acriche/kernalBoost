@@ -1,15 +1,12 @@
-library(XML)
 
-growTree <- function(df, y, pred = NULL, objective = "binary:logistic", 
-                     maxSplits = 10, minObsPerLeaf = 10, maxCandidatesPerFeature = 50,
-                     lambda = 0.1){
+
+growTree <- function(df, y, objective = "binary:logistic", 
+                     maxSplits = 10, minObsPerLeaf = 10, maxCandidatesPerFeature = 50){
   
   # config:
   maxCandidatesPerFeature <<- maxCandidatesPerFeature
   objective <<- objective
-  minObsPerLeaf <<- minObsPerLeaf
-  lambda <<- lambda
-
+  
   # preprocessing:  
   ## clean:
   allNa <- as.vector(sapply(df, function(x) !any(!is.na(x))))
@@ -18,32 +15,20 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
   #df <- df[!zeroVar]
   
   ## initial categorization:
-  ## todo: add support for ordered features
   numericFeatures <<- as.vector(sapply(df, is.numeric))
   factorFeatures <<- !numericFeatures
 
   ## find possible splits:
   n <- nrow(df)
   
-  # reset pred vector if not supplied:                                                                    
-  if (is.null(pred)) pred <- rep(mean(y), n)
-  
-  #compute grad and hess vectors:
-  if (objective == "binary:logistic") {
-    grad <- binomialGrad(pred = pred, y = y) 
-    hess <- binomialHess(pred = pred, y = y)
-  }
+  # reset pred vector:                                                                    
+  pred <- rep(0.5, n)
 
   # reset tree data.frame - the tree object will save:
   ## nodeId, parentId, parentSplit, acceptMissing, score
-  outputTree <- data.frame(nodeId = 1, parentId = NA, 
-                           parentSplitFeature = NA, 
-                           parentSplitOperator = NA,
+  outputTree <- data.frame(nodeId = 1, parentId = NA, parentSplitFeature = NA, 
                            parentSplitValue = NA,
-                           acceptMissing = T, 
-                           score = mean(y),
-                           scoreVar = var(y),
-                           leafN = length(y))
+                           acceptMissing = T, score = mean(y))
   
   # leafObj: for now, the leaf object will save the following info about only CURRENT leafs:
   ## nodeId, remaining entities, bestSplitFeature ,bestSplitValue and maxGain. (in case computed)
@@ -68,24 +53,23 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
         # given the leaf's remaining entities indicator, find the best split:
         split.t <- findBestSplit(df[leafObj[[t]]$remainingEntities, ], 
                                  y[leafObj[[t]]$remainingEntities], 
-                                 grad[leafObj[[t]]$remainingEntities],
-                                 hess[leafObj[[t]]$remainingEntities])
-        
+                                 pred[leafObj[[t]]$remainingEntities])
         # update the leafObj with info on the best split:
-        leafObj[[t]]$maxGain <- split.t$bestSplit$gain
-        leafObj[[t]]$bestSplitFeature <- split.t$bestSplit$feature
-        leafObj[[t]]$bestSplitValue <- split.t$bestSplit$split
-        leafObj[[t]]$missingToLeft <- split.t$bestSplit$missingToLeft
+        leafObj[[t]]$maxGain <- split.t$gain
+        leafObj[[t]]$bestSplitFeature <- split.t$feature
+        leafObj[[t]]$bestSplitValue <- split.t$split
+        leafObj[[t]]$missingToLeft <- split.t$missingToLeft
       }
     }
+    # find and lock the best split:
+    bestNodeId <- lapply(leafObj, function(x) {
+      gains <- unlist(x["maxGain"])
+      if (!any(gains != -Inf)) return("FinishTree")
+      ind <- which(gains == max(gains))
+      return(ind[[1]])
+    })[[1]]
     
-    gains <- unlist(lapply(leafObj, function(x) {
-      return(unlist(x["maxGain"]))}))
-    if (any(gains > -Inf)) {
-      # find and lock the best split:
-      bestNodeInd <- which(gains == max(gains))[[1]]
-      bestNodeId <- leafObj[[bestNodeInd]]$nodeId
-      
+    if (bestNodeId != "FinishTree"){
       # update leafObj: add 2 new leafs
       parentLeafObj <- unpackLeafObjByNodeId(leafObj, bestNodeId)
       leftNodeRemainingEntities <- computeRemainingEntities(entityIds = parentLeafObj$remainingEntities,
@@ -94,8 +78,7 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
                                                             featureSplit = parentLeafObj$bestSplitFeature, 
                                                             valueSplit = parentLeafObj$bestSplitValue,
                                                             missingToLeft = parentLeafObj$missingToLeft,
-                                                            getLeftNodeEntities = T, 
-                                                            isNumericFeature = parentLeafObj$bestSplitFeature %in% colnames(df)[numericFeatures])
+                                                            getLeftNodeEntities = T)
       rightNodeRemainingEntities <- parentLeafObj$remainingEntities[!(parentLeafObj$remainingEntities %in% 
                                                                        leftNodeRemainingEntities)]
       leftLeaf <- list(nodeId = nodeIdCounter + 1, 
@@ -113,23 +96,14 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
       # update tree structure: add 2 new leafs - left/right
       leftNodeYMean <- mean(y[leftNodeRemainingEntities])
       rightNodeYMean <- mean(y[rightNodeRemainingEntities])
-      leftNodeYVar <- var(y[leftNodeRemainingEntities])
-      rightNodeYVar <- var(y[rightNodeRemainingEntities])
-      if (parentLeafObj$bestSplitFeature %in% colnames(df)[numericFeatures]) {
-        parentSplitOperator <- c("<=", ">")
-      } else 
-        parentSplitOperator <- c("%in%", "%!in%")
-    
       newTreeEntries <- data.frame(nodeId = (nodeIdCounter + 1):(nodeIdCounter + 2),
                                    parentId = rep(parentLeafObj$nodeId, 2), 
                                    parentSplitFeature = rep(parentLeafObj$bestSplitFeature, 2), 
-                                   parentSplitOperator = parentSplitOperator, 
-                                   parentSplitValue = rep(parentLeafObj$bestSplitValue, 2),
+                                   parentSplitValue = c(parentLeafObj$bestSplitValue,
+                                                        paste0("!", parentLeafObj$bestSplitValue)),
                                    acceptMissing = c(parentLeafObj$missingToLeft, 
                                                      !parentLeafObj$missingToLeft), 
-                                   score = c(leftNodeYMean, rightNodeYMean),
-                                   scoreVar = c(leftNodeYVar, rightNodeYVar),
-                                   leafN = c(length(leftNodeRemainingEntities), length(rightNodeRemainingEntities)))
+                                   score = c(leftNodeYMean, rightNodeYMean))
       outputTree <- rbind(outputTree, newTreeEntries)
       nodeIdCounter <- nodeIdCounter + 2
       
@@ -140,11 +114,7 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
       # prevent current leafs from splitting according to the stopping criteria:
       leafIndToDelete <- which(unlist(
         lapply(leafObj, function(x) length(x$remainingEntities))) <= minObsPerLeaf)
-      if (length(leafIndToDelete) > 0) {
-        for (r in 1:length(leafIndToDelete)) {
-          leafObj[[leafIndToDelete[r]]] <- NULL
-        }
-      }
+      if (length(leafIndToDelete) > 0) leafObj[[leafIndToDelete]] <- NULL
       
       # check maxSplits stopping criteria:
       nSplits <- nSplits + 1
@@ -155,11 +125,7 @@ growTree <- function(df, y, pred = NULL, objective = "binary:logistic",
       stopGrowing <- T
     }
   }
-  # tree post processing:
-  outputTree$isLeaf <- F
-  outputTree$isLeaf[!(outputTree$nodeId %in% outputTree$parentId)] <- T
-  outputTree$isNumericFeature <- !grepl(pattern = "in", x = outputTree$parentSplitOperator)
-
+  
   return(outputTree)
 }
 
@@ -176,82 +142,66 @@ findSplitsForNumeric <- function(numeric.df, maxCandidatesPerFeature){
 
 findSplitsForFactor <- function(factor.df, maxCandidatesPerFeature){
   # todo: change to make more optimal
-  factorGroups <- sapply(factor.df, function(x) list(unique(x[!is.na(x)])))
+  factorGroups <- sapply(factor.df, function(x) list(unique(x)))
   return(factorGroups)
 }
 
-findBestSplit <- function(df, y, grad, hess){
+findBestSplit <- function(df, y, pred){
   # input: REMAINING entities in df, y, pred.
   # return: given the remaining entities in the node, best feature/split available
   
-
   # save the possible splits for this leaf: (todo - save the remaining possible splits per leaf
   # to remove redundant computation)
   numericSplits <- findSplitsForNumeric(df[numericFeatures], maxCandidatesPerFeature)
   factorSplits <- findSplitsForFactor(df[factorFeatures], maxCandidatesPerFeature)
   possibleSplits <- c(numericSplits, factorSplits)
   
-  # compute node G and H:
-  G <- sum(grad)
-  H <- sum(hess)
-  
   pTag <- length(possibleSplits)
-  gainMatrix <- data.frame("feature" = names(possibleSplits), "split" = rep("", pTag),
+  gainMatrix <- data.frame("feature" = names(possibleSplits), "split" = rep(NA, pTag),
                            "missingToLeft" = rep(T, pTag), "gain" = rep(0, pTag))
   gainMatrix$feature <- as.character(gainMatrix$feature)
-  gainMatrix$split <- as.character(gainMatrix$split)
   for (i in 1:pTag){
-    splits <- as.character(unlist(possibleSplits[names(possibleSplits) %in% gainMatrix$feature[i]][[1]]))
-    if (length(splits) > 0) {
+    if (gainMatrix$feature[i] %in% colnames(df)[numericFeatures]){ # numeric feature:
       gainMatrix[i, c("split", "missingToLeft", "gain")] <- 
-        findMaxGainForFeature(feature = df[gainMatrix$feature[i]], 
-                              y = y, 
-                              grad = grad, 
-                              hess = hess,
-                              G = G,
-                              H = H,
-                              splits = splits)
-    } else {
-      gainMatrix[i, "gain"] <- -Inf
+        findMaxGainForNumericFeature(feature = df[i], 
+                                     y = y, 
+                                     pred = pred, 
+                                     splits = unlist(numericSplits[names(numericSplits) %in% colnames(df)[i]][[1]]))
+    } else { # factor feature:
+      gainMatrix[i, c("split", "missingToLeft", "gain")] <- findMaxGainForFactorFeature()
     }
-
   }
   
-  bestSplit <- gainMatrix[(gainMatrix$gain == max(gainMatrix$gain)), ][1, ]
-  return(list(bestSplit = bestSplit))
+  if (var(gainMatrix$gain) == 0){
+    # do not continue to split the leaf:
+    gainMatrix <- gainMatrix[1, ]
+    gainMatrix$gain <- -Inf
+  }
+  
+  bestSplit <- gainMatrix[(gainMatrix$gain == max(gainMatrix$gain)), ]
+  return(bestSplit)
 }
 
-findMaxGainForFeature <- function(feature, y, grad, hess, G, H, splits){
+findMaxGainForNumericFeature <- function(feature, y, pred, splits){
   # Desc: for each split in a certain numeric feature, output the best 
   #       split, missing action, and gain.
   
   feature <- feature[[1]]
-  numericFeature <- is.numeric(feature)
   splitGainMatrix <- data.frame("split" = splits, 
                                 "missingToLeft" = rep(T, length(splits)), 
                                 "gain" = rep(NA, length(splits)))
-  splitGainMatrix$split <- as.character(splitGainMatrix$split)
-  
   nTag <- length(feature)
   if (any(is.na(feature))){ # has missing:
     for (j in 1:nrow(splitGainMatrix)){
-      if (numericFeature) { # try missing to the left
-        leftSplitInd <- which(feature <= splits[j] | is.na(feature)) 
-      } else 
-        leftSplitInd <- which(feature %in% (splits[j]) | is.na(feature)) 
-      leftSplitIndLength <- length(leftSplitInd)
-      if (leftSplitIndLength > minObsPerLeaf && leftSplitIndLength <= (nTag - minObsPerLeaf)){
-        missingToLeftGain <- computeGainPerSplit(leftSplitInd, grad, hess, G, H)
+      leftSplitInd <- which(feature <= splits[j] | is.na(feature)) # try missing to the left
+      if (length(leftSplitInd) > 0 && length(leftSplitInd) < nTag){
+        missingToLeftGain <- computeGainPerSplit(leftSplitInd, y, pred)
       } else {
         missingToLeftGain <- -Inf
       }
-      if (numericFeature) { # try missing to the right
-        leftSplitInd <- which(feature <= splits[j]) 
-      } else 
-        leftSplitInd <- which(feature %in% splits[j])
-      leftSplitIndLength <- length(leftSplitInd)
-      if (leftSplitIndLength > minObsPerLeaf && leftSplitIndLength <= (nTag - minObsPerLeaf)){
-        missingToRightGain <- computeGainPerSplit(leftSplitInd, grad, hess, G, H)
+      leftSplitInd <- which(feature <= splits[j]) # try missing to the right
+      if (length(leftSplitInd) > 0 && length(leftSplitInd) < nTag){
+        missingToRightGain <- computeGainPerSplit(leftSplitInd, y, pred)
       } else {
         missingToRightGain <- -Inf
       }
@@ -264,40 +214,38 @@ findMaxGainForFeature <- function(feature, y, grad, hess, G, H, splits){
       }
     }
   } else { # no missing:
-    if (length(splits) > 1){
-      for (j in 1:length(splits)){
-        if (numericFeature) {
-          leftSplitInd <- which(feature <= splits[j])
-        } else 
-          leftSplitInd <- which(feature %in% splits[j])
-        leftSplitIndLength <- length(leftSplitInd)
-        if (leftSplitIndLength > minObsPerLeaf && leftSplitIndLength <= (nTag - minObsPerLeaf)){
-          gain <- computeGainPerSplit(leftSplitInd, grad, hess, G, H)
-        } else {
-          gain <- -Inf
-        }
-        splitGainMatrix$gain[j] <- gain
+    for (j in 1:length(splits)){
+      leftSplitInd <- which(feature <= splits[j])
+      if (length(leftSplitInd) > 0 && length(leftSplitInd) < nTag){
+        gain <- computeGainPerSplit(leftSplitInd, y, pred)
+      } else {
+        gain <- -Inf
       }
-    } else {
-      splitGainMatrix$gain <- -Inf
+      splitGainMatrix$gain[j] <- gain
     }
   }
   bestSplit <- which(splitGainMatrix$gain == max(splitGainMatrix$gain))[1]
   return(splitGainMatrix[bestSplit, ])
 }
 
-computeGainPerSplit <- function(leftSplitInd, grad, hess, G, H){
-  G.left <- sum(grad[leftSplitInd])
-  H.left <- sum(hess[leftSplitInd])
-  G.right <- G - G.left
-  H.right <- H - H.left
-  splitGain <- 0.5 * (purity(G.left, H.left) + purity(G.right, H.right) - purity(G, H))
-  return(splitGain)
+computeGainPerSplit <- function(leftSplitInd, y, pred){
+    newLeftLeafPred <- rep(mean(y[leftSplitInd]), length(leftSplitInd))
+    newRightLeafPred <- rep(mean(y[!(1:length(y) %in% leftSplitInd)]), (length(y) - length(leftSplitInd)))
+    if (objective == "binary:logistic") {
+      purityBefore <- purity(grad = binomialGrad(pred = pred, y = y), 
+                             hess = binomialHess(pred = pred, y = y))
+      purityLeft <- purity(grad = binomialGrad(pred = newLeftLeafPred, y = y[leftSplitInd]), 
+                           hess = binomialHess(pred = newLeftLeafPred, y = y[leftSplitInd]))
+      purityRight <- purity(grad = binomialGrad(pred = newRightLeafPred, y = y[!(1:length(y) %in% leftSplitInd)]), 
+                            hess = binomialHess(pred = newRightLeafPred, y = y[!(1:length(y) %in% leftSplitInd)]))
+      splitGain <- gain(purityBefore, purityLeft, purityRight)
+    }
+    return(splitGain)
 }
 
 
-purity <- function(grad, hess){
-  return((grad)^2 / (hess + lambda))
+purity <- function(grad, hess, lambda = 0.1){
+  return((sum(grad))^2 / (sum(hess) + lambda))
 }
 
 gain <- function(purityBefore, purityLeft, purityRight){
@@ -320,9 +268,9 @@ unpackLeafObjByNodeId <- function(leafObj, nodeId){
   return(leafObj[[ind2]])
 }
 
-computeRemainingEntities <- function(entityIds, df, parentNodeId, featureSplit, valueSplit, missingToLeft, getLeftNodeEntities, isNumericFeature){
+computeRemainingEntities <- function(entityIds, df, parentNodeId, featureSplit, valueSplit, missingToLeft, getLeftNodeEntities){
   feature <- df[featureSplit][[1]]
-  if (isNumericFeature) { # numeric feature:
+  if (is.numeric(valueSplit)) { # numeric feature:
     if (getLeftNodeEntities){
       res <- which(feature <= valueSplit)
     } else {
@@ -332,15 +280,11 @@ computeRemainingEntities <- function(entityIds, df, parentNodeId, featureSplit, 
     if (getLeftNodeEntities){
       res <- which(feature %in% valueSplit)
     } else {
-      res <- which(feature %!in% valueSplit)
+      res <- which(!(feature %in% valueSplit))
     }
   }
   if ((missingToLeft & getLeftNodeEntities) | (!missingToLeft & !getLeftNodeEntities)){
     res <- c(res, which(is.na(feature)))
   }
   return(entityIds[res])
-}
-
-'%!in%' <- function(x,y){
-  !('%in%'(x,y))
 }
